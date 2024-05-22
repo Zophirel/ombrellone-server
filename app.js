@@ -45,6 +45,59 @@ app.get('/booked-place-ratio', async (req, res) => {
   }*/
 });
 
+export const bookingValidator = [
+  body('row', "Il campo row non puo' rimanere vuoto").not().isEmpty(),
+  body('row', "Campo row errato").matches(/^(?:[1-9]|1[0-5])$/),
+  body('column', "Il campo column non puo' rimanere vuoto").not().isEmpty(),
+  body('column', "Campo column errato").matches(/^[A-J]$/),
+  body('date', "Il campo date non puo' rimanere vuoto").not().isEmpty(),
+  body('chair', "Il campo chair non puo' rimanere vuoto").not().isEmpty(),
+  body('chair', "Campo chair errato").matches(/^[1-4]$/)
+];
+
+app.post('/book', bookingValidator, express.json(), async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  if (req.session.login === true) {
+    try {
+      console.log(`${req.body["row"]}, ${req.body["column"]}`);
+      await db.makeReservation(req.session.user, req.body["column"], req.body["row"], req.body["date"], req.body["chair"]);
+      res.status(200).send({ msg: "Prenotazione effetuata!" });
+      return;
+    } catch (err) {
+      if (err instanceof PlaceAlreadyBooked) {
+        res.status(400).send({ msg: "Posto gia' occupato" });
+        return;
+      }
+      console.log(err);
+      res.status(500).send({ msg: "Errore del server" });
+    }
+  } else {
+    res.status(403).send("user not logged");
+  }
+});
+
+
+app.get('/booked', express.json(), async (req, res) => {
+  try {
+   
+    if(req.session.login){
+      let bookings = await db.getUserBookings(req.session.user.id);
+      res.status(200).send(bookings);
+      return;
+    }
+    res.status(400).send("user not logged");
+    return;
+   
+  } catch (err){
+    res.status(400).send(`ERROR ${err}`);
+    return;
+  }
+})
+
 app.get('/place', async (req, res) => {
   res.status(200).send(await db.getPlaceList());
 });
@@ -59,7 +112,7 @@ app.get('/', async (req, res) => {
       res.status(200).send('User not logged');
     } else {
       try{
-        await db.makeReservation(req.session.user, 'A', 0, new Date('06-03-2024'));
+        //await db.makeReservation(req.session.user, 'A', 0, new Date('06-03-2024'));
       } catch (err){
         if(err instanceof PlaceAlreadyBooked){
           res.status(400).send({msg: "Posto gia' occupato"});
@@ -153,6 +206,11 @@ app.post('/signup', signupValidator, async (req, res) => {
 app.get('/logout', async (req, res) => {
   req.session.destroy();
   res.status(200).send({msg: "LogOut effettuato"});
+});
+
+app.get("/delbook", async (req, res) => {
+  await db.removeAllReservations();
+  res.status(200).send("ok")
 });
 
 
