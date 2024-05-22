@@ -38,7 +38,7 @@ async function insertBeach(){
 }
 
 async function setPlaces(){
-    
+        
     const db = client.db(DBNAME);
     const places = db.collection("beach_place");
     let j = 1;
@@ -59,8 +59,7 @@ async function setPlaces(){
             j++;
             filaCounter++;
         }
-
-
+        
         places.insertOne(place);
     }
 
@@ -98,7 +97,6 @@ async function signUp(name, surname, email, password, tel) {
 
     const db = client.db(DBNAME);
     const users = db.collection("user");
-    
     const checkedUser = await users.findOne({email: email});
     
     if(checkedUser != null){
@@ -118,15 +116,15 @@ async function signUp(name, surname, email, password, tel) {
 
   /// Reservation
 
-async function makeReservation(user, row, placeIndex, date){
+async function makeReservation(user, row, placeIndex, date, chair){
     const db = client.db(DBNAME);
     const beachPlaces = db.collection("beach_place");    
     const beachPlacesReservation = db.collection("beach_place_reservation");
-
+    
     const filterReservations = {
         beachId: '4gZNmQXk',
         placeRow: row,
-        placeIndex: placeIndex + 1,
+        placeIndex: placeIndex,
         date: date
     };
 
@@ -141,15 +139,36 @@ async function makeReservation(user, row, placeIndex, date){
             userId: user.id,
             date: date,
             placeRow: row,
-            placeIndex: placeIndex + 1
+            placeIndex: placeIndex,
+            chairs: chair,
+            price: 10 + (chair > 1 ? 5 * chair : 0)
         }
 
         await beachPlacesReservation.insertOne(booking);
-        await beachPlaces.updateOne({index: placeIndex + 1, row: row}, {$addToSet: {reservations: date}});
+        await beachPlaces.updateOne({index: placeIndex, row: row}, {$addToSet: {reservations: date}});
     
     } else {
         throw new PlaceAlreadyBooked();
     }
+}
+
+async function removeAllReservations(){
+    const db = client.db(DBNAME);
+    const beachPlaces = db.collection("beach_place");
+    
+    const filter = {
+        reservations: {
+            $exists: true,
+            $not: { $size: 0 }
+        },
+    }
+
+    const updateFilter = { 
+        $set: { reservations: [] }
+    }
+
+    await beachPlaces.updateMany( filter, updateFilter );
+   
 }
 
 async function deleteReservation(user, placeIndex, date){
@@ -181,6 +200,62 @@ async function deleteReservation(user, placeIndex, date){
     } else {
         throw new PlaceNotBooked();
     }
+}
+
+async function getUserBookings(id){
+    const db = client.db(DBNAME);
+    const beachPlacesReservation = db.collection("beach_place_reservation");
+
+    let bookings = await beachPlacesReservation.aggregate([
+        {
+            $match: { userId: id } // Filter the reservations based on userId
+        },
+        {
+            $lookup: {
+                from: 'user', // The first collection to join
+                localField: 'userId', // Field from beachPlacesReservation collection
+                foreignField: 'id', // Field from users collection
+                as: 'userDetails' // Alias for the joined field
+            }
+        },
+        {
+            $unwind: '$userDetails' // Deconstructs the array field from the first lookup
+        },
+        {
+            $lookup: {
+                from: 'beach', // The second collection to join
+                localField: 'beachId', // Field from beachPlacesReservation collection
+                foreignField: 'id', // Field from beaches collection
+                as: 'beachDetails' // Alias for the joined field
+            }
+        },
+        {
+            $unwind: '$beachDetails' // Deconstructs the array field from the second lookup
+        },
+        {
+            $project: {
+                _id: 0,
+                id: 1,
+                userName: '$userDetails.name', 
+                userSurname: '$userDetails.surname',
+                beachName: '$beachDetails.name',
+                date: 1,
+                placeRow: 1,
+                placeIndex: 1, 
+                chair: 1, 
+                price: 1, 
+            }
+        }
+    ]).toArray();
+    
+    
+    
+      
+    //let bookings = await beachPlacesReservation.find({ userId: id }, { projection: { _id: 0 } }).toArray();
+    
+    console.log("GET USER BOOKINGS");
+    console.log(bookings);
+    return bookings
 }
 
 async function getBookingRatios(){
@@ -231,12 +306,16 @@ async function getPlaceList(){
    return placeList;
 }
 
+
+
 export default { 
     signUp, 
     login, 
     makeReservation, 
+    removeAllReservations,
     deleteReservation, 
     setPlaces, 
     getBookingRatios,
-    getPlaceList
+    getPlaceList,
+    getUserBookings
 };
