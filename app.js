@@ -63,9 +63,16 @@ app.post('/book', bookingValidator, express.json(), async (req, res) => {
 
   if (req.session.login === true) {
     try {
-      console.log(`${req.body["row"]}, ${req.body["column"]}`);
-      await db.makeReservation(req.session.user, req.body["column"], req.body["row"], req.body["date"], req.body["chair"]);
-      res.status(200).send({ msg: "Prenotazione effetuata!" });
+   
+      res.status(200).send(
+        await db.makeReservation(
+          req.session.user, 
+          req.body["column"], 
+          req.body["row"], 
+          req.body["date"], 
+          req.body["chair"]
+        )
+      );
       return;
     } catch (err) {
       if (err instanceof PlaceAlreadyBooked) {
