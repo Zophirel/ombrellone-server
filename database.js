@@ -62,7 +62,6 @@ async function setPlaces(){
         
         places.insertOne(place);
     }
-
 }
 
 /// Auth
@@ -120,7 +119,9 @@ async function makeReservation(user, row, placeIndex, date, chair){
     const db = client.db(DBNAME);
     const beachPlaces = db.collection("beach_place");    
     const beachPlacesReservation = db.collection("beach_place_reservation");
-    
+    const users = db.collection("user"); 
+    const beaches = db.collection("beach"); 
+
     const filterReservations = {
         beachId: '4gZNmQXk',
         placeRow: row,
@@ -129,11 +130,11 @@ async function makeReservation(user, row, placeIndex, date, chair){
     };
 
     let placeToBook = await beachPlacesReservation.findOne(filterReservations);
-    let bookingId = new ShortUniqueId({ length: 10 })
+    let bookingId = new ShortUniqueId({ length: 10 });
 
     // place to book is not booked yet
     if(placeToBook === null){
-        const booking = {
+        const bookingData = {
             id: bookingId.randomUUID(),
             beachId: '4gZNmQXk',
             userId: user.id,
@@ -142,11 +143,31 @@ async function makeReservation(user, row, placeIndex, date, chair){
             placeIndex: placeIndex,
             chairs: chair,
             price: 10 + (chair > 1 ? 5 * chair : 0)
+        };
+
+        await beachPlacesReservation.insertOne(bookingData);
+        await beachPlaces.updateOne({index: placeIndex, row: row}, {$addToSet: {reservations: date}});
+
+        // Fetch the booking details
+        const booking = await beachPlacesReservation.findOne({ id: bookingData.id });
+
+        if (booking) {
+            // Fetch user details
+            const userDetails = await users.findOne({ id: booking.userId }, { projection: { _id: 0, name: 1, surname: 1 } });
+            // Fetch beach details
+            const beachDetails = await beaches.findOne({ id: booking.beachId }, { projection: { _id: 0, name: 1 } });
+
+            // Merge details
+            booking.userName = userDetails.name;
+            booking.userSurname = userDetails.surname;
+            booking.beachName = beachDetails.name;
+
+            delete booking.userId;
+            delete booking.beachId;
+            delete booking._id;
         }
 
-        await beachPlacesReservation.insertOne(booking);
-        await beachPlaces.updateOne({index: placeIndex, row: row}, {$addToSet: {reservations: date}});
-    
+        return booking;
     } else {
         throw new PlaceAlreadyBooked();
     }
@@ -242,7 +263,7 @@ async function getUserBookings(id){
                 date: 1,
                 placeRow: 1,
                 placeIndex: 1, 
-                chair: 1, 
+                chairs: 1, 
                 price: 1, 
             }
         }
