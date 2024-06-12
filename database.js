@@ -3,6 +3,8 @@ import { UserAlreadyPresent, EmailNotPresent, BadCredentials } from "./auth_expe
 import { promisify } from 'util';
 import { compare, genSalt, hash as _hash } from "bcrypt";
 import ShortUniqueId from "short-unique-id";
+import crypto from 'crypto';
+
 import { 
     PlaceAlreadyBooked, 
     PlaceBookingDeletionNotPermitted, 
@@ -73,7 +75,7 @@ async function signUp(name, surname, email, password, tel) {
     const checkedUser = await users.findOne({ $or: [{ email: email }, { tel: tel }] });
 
     if(checkedUser == null){           
-        genSalt(10, function(err, salt) {
+        genSalt(10, function(_, salt) {
             _hash(password, salt, async function(err, hash) {
                 let user = {
                     "id" :  randomUUID(),
@@ -114,8 +116,33 @@ async function signUp(name, surname, email, password, tel) {
   }
 
   /// Reservation
+// AES encryption function
+function encrypt(text) {
+    const iv = crypto.randomBytes(16); // Initialization vector
+    console.log("env");
+    console.log(process.env);
+    console.log("qr key");
+    console.log(process.env.QR_KEY);
+    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(process.env.QR_KEY, 'hex'), iv);
+    let encrypted = cipher.update(text);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    return iv.toString('hex') + ':' + encrypted.toString('hex');
+}
+
+// AES decryption function
+function decrypt(text) {
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift(), 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(process.env.QR_KEY, 'hex'), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+}
+
 
 async function makeReservation(user, row, placeIndex, date, chair){
+
     const db = client.db(DBNAME);
     const beachPlaces = db.collection("beach_place");    
     const beachPlacesReservation = db.collection("beach_place_reservation");
@@ -138,12 +165,17 @@ async function makeReservation(user, row, placeIndex, date, chair){
             id: bookingId.randomUUID(),
             beachId: '4gZNmQXk',
             userId: user.id,
+            userName: user.name,
+            userSurname: user.surname,
             date: date,
+            added: new Date().toISOString(),
             placeRow: row,
             placeIndex: placeIndex,
             chairs: chair,
             price: 10 + (chair > 1 ? 5 * chair : 0)
         };
+
+        bookingData.qrData = encrypt(JSON.stringify(bookingData));
 
         await beachPlacesReservation.insertOne(bookingData);
         await beachPlaces.updateOne({index: placeIndex, row: row}, {$addToSet: {reservations: date}});
@@ -152,6 +184,9 @@ async function makeReservation(user, row, placeIndex, date, chair){
         const booking = await beachPlacesReservation.findOne({ id: bookingData.id });
 
         if (booking) {
+            console.log("BOOKING");
+            console.log(booking);
+
             // Fetch user details
             const userDetails = await users.findOne({ id: booking.userId }, { projection: { _id: 0, name: 1, surname: 1 } });
             // Fetch beach details
@@ -229,20 +264,6 @@ async function getUserBookings(id){
 
     let bookings = await beachPlacesReservation.aggregate([
         {
-            $match: { userId: id } // Filter the reservations based on userId
-        },
-        {
-            $lookup: {
-                from: 'user', // The first collection to join
-                localField: 'userId', // Field from beachPlacesReservation collection
-                foreignField: 'id', // Field from users collection
-                as: 'userDetails' // Alias for the joined field
-            }
-        },
-        {
-            $unwind: '$userDetails' // Deconstructs the array field from the first lookup
-        },
-        {
             $lookup: {
                 from: 'beach', // The second collection to join
                 localField: 'beachId', // Field from beachPlacesReservation collection
@@ -256,26 +277,21 @@ async function getUserBookings(id){
         {
             $project: {
                 _id: 0,
+                qrData: 1,
                 id: 1,
-                userName: '$userDetails.name', 
-                userSurname: '$userDetails.surname',
+                userName: 1, 
+                userSurname: 1,
                 beachName: '$beachDetails.name',
                 date: 1,
                 placeRow: 1,
                 placeIndex: 1, 
                 chairs: 1, 
                 price: 1, 
+                added: 1
             }
         }
     ]).toArray();
     
-    
-    
-      
-    //let bookings = await beachPlacesReservation.find({ userId: id }, { projection: { _id: 0 } }).toArray();
-    
-    console.log("GET USER BOOKINGS");
-    console.log(bookings);
     return bookings
 }
 
@@ -327,7 +343,26 @@ async function getPlaceList(){
    return placeList;
 }
 
-
+async function editUserInfo(data, sessionUser){
+    const db = client.db(DBNAME);
+    const user = db.collection("user"); 
+    const updateFilter = { 
+        $set: { 
+            name: data["name"] ?? sessionUser.name, 
+            surname: data["surname"] ?? sessionUser.surname,
+            email: data["email"] ?? sessionUser.email
+        }
+    }
+    
+    console.log("SESSION USER");
+    console.log(sessionUser);
+    let update = await user.findOneAndUpdate({id: sessionUser.id}, updateFilter); 
+   
+    console.log("UPDATE AND FIND ONE");
+    console.log(update);
+    return update; 
+    
+}
 
 export default { 
     signUp, 
@@ -338,5 +373,6 @@ export default {
     setPlaces, 
     getBookingRatios,
     getPlaceList,
-    getUserBookings
+    getUserBookings, 
+    editUserInfo
 };
