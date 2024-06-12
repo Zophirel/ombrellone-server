@@ -8,10 +8,12 @@ import { PlaceAlreadyBooked } from './booking_excepiton.js';
 import { body, validationResult } from 'express-validator';
 import helmet from 'helmet';
 import User from './models/user.js';
-import ShortUniqueId from "short-unique-id";
-const { randomUUID } = new ShortUniqueId({ length: 10 });
+import Stripe from 'stripe';
+import {createOrder, captureOrder, calculateOrderAmount} from './payment/paypal.js';
+import { checkPaymentStatus } from './payment/stripe.js'
 
 const app = express();
+const stripe = new Stripe(process.env.STRIPE_KEY);
 
 app.use(helmet());
 app.use(bodyParser.json());
@@ -36,16 +38,52 @@ const corsConfig = {
 app.use(cors(corsConfig));
 app.use(session(sessionConfig));
 
-app.get('/booked-place-ratio', async (req, res) => {
-  res.status(200).send(await db.getBookingRatios());
-  /*if(req.session.isLogin === true){
-    res.status(200).send(await db.getBookingRatios());
+// Home
+app.get('/', async (req, res) => {
+  if (req.session.login === undefined) {
+    req.session.login = false;
+    res.status(200).send('User not logged');
   } else {
-    res.status(400).send("user not logged");
-  }*/
+    if(!req.session.login){
+      res.status(200).send('User not logged');
+    } else {
+      try{
+       
+      } catch (err){
+        if(err instanceof PlaceAlreadyBooked){
+          res.status(400).send({msg: "Posto gia' occupato"});
+          return;
+        }
+        console.log(err);
+      }
+     
+      res.status(200).send('User is logged');
+    }
+  }
 });
 
-export const bookingValidator = [
+// Stripe
+app.get('/initpayment', async (req, res) => {
+  try {
+    // Create a PaymentIntent with the order amount
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: 1000, // Amount in cents
+      currency: 'eur',
+    });
+    req.session.paymentIntent = paymentIntent;
+    req.session.paymentIntentId = paymentIntent.id;
+
+    res.send({
+      clientSecret: paymentIntent.client_secret,
+    });
+    return;
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+});
+
+export const checkOutValidator = [
   body('row', "Il campo row non puo' rimanere vuoto").not().isEmpty(),
   body('row', "Campo row errato").matches(/^(?:[1-9]|1[0-5])$/),
   body('column', "Il campo column non puo' rimanere vuoto").not().isEmpty(),
@@ -55,35 +93,131 @@ export const bookingValidator = [
   body('chair', "Campo chair errato").matches(/^[1-4]$/)
 ];
 
-app.post('/book', bookingValidator, express.json(), async (req, res) => {
+app.post('/checkout', checkOutValidator, async (req, res) => { 
+  
   const errors = validationResult(req);
+    
   if (!errors.isEmpty()) {
+    console.log("ERRORS IN PARAMS")
     return res.status(400).json({ errors: errors.array() });
   }
 
-  if (req.session.login === true) {
+  console.log("checkout")
+  const numChairs = req.body["chair"];
+
+  try {
+    const orderAmount = calculateOrderAmount(numChairs);
+    if(req.session.paymentIntentId){
+      // Update existing PaymentIntent
+      const paymentIntent = await stripe.paymentIntents.update(req.session.paymentIntentId, {
+        amount: orderAmount * 100, // Amount in cents
+        currency: 'eur',
+      });
+      req.session.order = req.body;
+      return res.send({
+        clientSecret: paymentIntent.client_secret,
+      });
+
+    } else {
+      return res.status(500).send({ error: "Error in payment flow" });
+    }
+  } catch (error) {
+    return res.status(500).send({ error: error.message });
+  }
+});
+
+app.post("/confirm-stripe-payment", async (req, res) => {
+  let isPaymentValid = await checkPaymentStatus(req.session.paymentIntentId);
+  
+  if(isPaymentValid === "succeeded"){
     try {
-   
+      // Save reservation in db
       res.status(200).send(
         await db.makeReservation(
-          req.session.user, 
-          req.body["column"], 
-          req.body["row"], 
-          req.body["date"], 
-          req.body["chair"]
-        )
-      );
+        req.session.user, 
+        req.session.order.column, 
+        req.session.order.row, 
+        req.session.order.date, 
+        req.session.order.chair
+      )); 
+
+      req.session.paymentIntentId = undefined;
+      req.session.paymentIntent = undefined;
+      req.session.orderId = undefined;
+      req.session.order = undefined;
+
       return;
-    } catch (err) {
-      if (err instanceof PlaceAlreadyBooked) {
-        res.status(400).send({ msg: "Posto gia' occupato" });
-        return;
-      }
+    } catch(err){
+
       console.log(err);
-      res.status(500).send({ msg: "Errore del server" });
-    }
+      return res.status(403).send(err);
+      
+    }  
   } else {
-    res.status(403).send("user not logged");
+    return  res.status(403).send("Not Ok");
+  }
+});
+
+app.post('/paypal-checkout', checkOutValidator, async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const order = await createOrder(req);
+    req.session.paypalOrderId = order.id;
+    req.session.order = req.body;
+    return res.json(order);
+
+  } catch (error) {
+    res.status(500).send(error);
+  }
+});
+
+app.post('/paypal-buy', async (req, res) => {  
+  try {
+  
+    if(req.session.paypalOrderId){
+      const capture = await captureOrder(req, req.session.paypalOrderId);
+
+      if(capture.status === "COMPLETED"){
+        try {
+          // Save reservation in db
+       
+          res.status(200).send(
+            await db.makeReservation(
+            req.session.user, 
+            req.session.order.column, 
+            req.session.order.row, 
+            req.session.order.date, 
+            req.session.order.chair
+          )); 
+    
+          req.session.paymentIntentId = undefined;
+          req.session.paymentIntent = undefined;
+          req.session.orderId = undefined;
+          req.session.order = undefined;
+    
+          return;
+        } catch(err){
+          console.log(err);
+          return res.status(403).send(err);
+        }  
+      }
+      
+      req.session.paymentIntentId = undefined;
+      req.session.paymentIntent = undefined;
+      req.session.orderId = undefined;
+      req.session.order = undefined;
+      return res.json(capture);
+    }
+
+    return res.status(403).send({error: "Error in payment flow"})
+  } catch (error) {
+    console.log(error);
+    res.status(500).send(error);
   }
 });
 
@@ -105,33 +239,18 @@ app.get('/booked', express.json(), async (req, res) => {
   }
 })
 
-app.get('/place', async (req, res) => {
-  res.status(200).send(await db.getPlaceList());
+app.get('/place', async (_, res) => {
+  return res.status(200).send(await db.getPlaceList());
 });
 
-
-app.get('/', async (req, res) => {
-  if (req.session.login === undefined) {
-    req.session.login = false;
-    res.status(200).send('User not logged');
+app.get('/booked-place-ratio', async (req, res) => {
+  if(req.session.login === true){
+    res.status(200).send(await db.getBookingRatios());
   } else {
-    if(!req.session.login){
-      res.status(200).send('User not logged');
-    } else {
-      try{
-        //await db.makeReservation(req.session.user, 'A', 0, new Date('06-03-2024'));
-      } catch (err){
-        if(err instanceof PlaceAlreadyBooked){
-          res.status(400).send({msg: "Posto gia' occupato"});
-          return;
-        }
-        console.log(err);
-      }
-     
-      res.status(200).send('User is logged');
-    }
+    res.status(400).send("user not logged");
   }
 });
+
 
 const loginValidator = [
   body('email', 'Email non valida').isEmail()
@@ -148,7 +267,6 @@ app.post('/login', loginValidator, express.json(), async (req, res, next) => {
       const data = req.body;
       let user = await db.login(data["email"], data["password"]);
 
-      
       req.session.user = new User(user.id, user.name, user.surname, user.email, user.tel);
 
       res.cookie('name', user.name);
@@ -175,7 +293,7 @@ app.post('/login', loginValidator, express.json(), async (req, res, next) => {
   next();
 });
 
-
+// Auth section
 export const signupValidator = [
   body('name', "Il campo congome non puo' rimanere vuoto" ).not().isEmpty(),
   body('surname', "Il campo congome non puo' rimanere vuoto").not().isEmpty(),
@@ -185,28 +303,48 @@ export const signupValidator = [
 ]
 
 app.post('/signup', signupValidator, async (req, res) => {
-
   const errors = validationResult(req);
   if(req.session.login === false && errors.isEmpty()){
     try {
       const data = req.body;
       await db.signUp(data["name"], data["surname"], data["email"], data["password"], data["tel"]);
-      res.status(200).send({ msg: "Utente creato si prega di fare login" });
+      return res.status(200).send({ msg: "Utente creato si prega di fare login" });
     
     } catch (err) {
       console.log(err);
 
       if(err instanceof UserAlreadyPresent){
-        res.status(400).send({ msg: "Utente gia presente" });
+        return res.status(400).send({ msg: "Utente gia presente" });
       } else {
         console.error(err);
-        res.status(500).send({msg: "Internal Server Error"});
+        return res.status(500).send({msg: "Internal Server Error"});
       }
     }
   } else if(!errors.isEmpty()) {
-    res.status(400).send({msg: "Credenziali errate", errors: errors.errors});
+    return res.status(400).send({msg: "Credenziali errate", errors: errors.errors});
   } else{
-    res.status(304).send({ msg: "Utente gia' loggato"});
+    return res.status(304).send({ msg: "Utente gia' loggato"});
+  }
+});
+
+export const editUserInfoValidator = [
+  body('name', "Il campo congome non puo' rimanere vuoto" ).not().isEmpty(),
+  body('surname', "Il campo congome non puo' rimanere vuoto").not().isEmpty(),
+  body('email', 'Email non valida').isEmail(),
+]
+
+app.put('/edit-user-info', editUserInfoValidator, async (req, res) => {
+  const errors = validationResult(req);
+  if(req.session.login){
+    if(errors.isEmpty()){
+      req.session.user = await db.editUserInfo(req.body, req.session.user);
+      console.log(req.session);
+      return res.status(200).send("Dati modificati correttamente");
+    } else{
+      return res.status(400).send(errors.errors);
+    }
+  }else {
+    return res.status(304).send({ msg: "Utente non loggato" });
   }
 });
 
@@ -215,7 +353,7 @@ app.get('/logout', async (req, res) => {
   res.status(200).send({msg: "LogOut effettuato"});
 });
 
-app.get("/delbook", async (req, res) => {
+app.get("/delbook", async (_, res) => {
   await db.removeAllReservations();
   res.status(200).send("ok")
 });
