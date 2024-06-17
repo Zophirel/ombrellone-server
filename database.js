@@ -4,12 +4,13 @@ import { promisify } from 'util';
 import { compare, genSalt, hash as _hash } from "bcrypt";
 import ShortUniqueId from "short-unique-id";
 import crypto from 'crypto';
-
 import { 
     PlaceAlreadyBooked, 
     PlaceBookingDeletionNotPermitted, 
     PlaceNotBooked,
 } from "./booking_excepiton.js"
+import { ChangePasswordTokenNotValid, ChangePasswordTokenExpired, ChangePasswordTokenAlreadyPresent } from "./token_exeption.js";
+
 const { randomUUID } = new ShortUniqueId({ length: 8 });
 
 const bcryptCompare = promisify(compare);   
@@ -24,20 +25,6 @@ const client = new MongoClient(uri,  {
         }
     }
 );
-
-async function insertBeach(){
-    const db = client.db(DBNAME);
-    const beaches = db.collection("beach");
-    
-
-    let beach = {
-        id: randomUUID(),
-        name: "Lido 1",
-        places: places
-    }
-
-    beaches.insertOne(beach);
-}
 
 async function setPlaces(){
         
@@ -103,26 +90,19 @@ async function signUp(name, surname, email, password, tel) {
     if(checkedUser != null){
         let result = await bcryptCompare(password, checkedUser.password);
         if(result){
-            console.log("user logged");
             return checkedUser;
         } else {
-            console.log("bad credentials");
             throw new BadCredentials();
         }
     }else{
-        console.log("email not present");
         throw new EmailNotPresent();
     }
   }
 
-  /// Reservation
+/// Reservation
 // AES encryption function
 function encrypt(text) {
-    const iv = crypto.randomBytes(16); // Initialization vector
-    console.log("env");
-    console.log(process.env);
-    console.log("qr key");
-    console.log(process.env.QR_KEY);
+    const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(process.env.QR_KEY, 'hex'), iv);
     let encrypted = cipher.update(text);
     encrypted = Buffer.concat([encrypted, cipher.final()]);
@@ -184,9 +164,6 @@ async function makeReservation(user, row, placeIndex, date, chair){
         const booking = await beachPlacesReservation.findOne({ id: bookingData.id });
 
         if (booking) {
-            console.log("BOOKING");
-            console.log(booking);
-
             // Fetch user details
             const userDetails = await users.findOne({ id: booking.userId }, { projection: { _id: 0, name: 1, surname: 1 } });
             // Fetch beach details
@@ -208,24 +185,7 @@ async function makeReservation(user, row, placeIndex, date, chair){
     }
 }
 
-async function removeAllReservations(){
-    const db = client.db(DBNAME);
-    const beachPlaces = db.collection("beach_place");
-    
-    const filter = {
-        reservations: {
-            $exists: true,
-            $not: { $size: 0 }
-        },
-    }
 
-    const updateFilter = { 
-        $set: { reservations: [] }
-    }
-
-    await beachPlaces.updateMany( filter, updateFilter );
-   
-}
 
 async function deleteReservation(user, placeIndex, date){
     const db = client.db(DBNAME);
@@ -244,11 +204,7 @@ async function deleteReservation(user, placeIndex, date){
     if(placeToRemove !== null){    
         if(placeToRemove.userId === user.id){
             await beachPlacesReservation.deleteOne(placeToRemove);
-            console.log("BEACH PLACE");
-
-            let result = await beachPlaces.updateOne({index: 1}, {$pull: {reservations: date}});
-
-            console.log(result);
+            await beachPlaces.updateOne({index: 1}, {$pull: {reservations: date}});
         } else {
             throw new PlaceBookingDeletionNotPermitted();
         }
@@ -353,26 +309,120 @@ async function editUserInfo(data, sessionUser){
             email: data["email"] ?? sessionUser.email
         }
     }
-    
-    console.log("SESSION USER");
-    console.log(sessionUser);
+
     let update = await user.findOneAndUpdate({id: sessionUser.id}, updateFilter); 
-   
-    console.log("UPDATE AND FIND ONE");
-    console.log(update);
-    return update; 
+    return update;     
+}
+
+
+// Function to generate a token with an expiration time
+function generatePasswordTokenWithExpiry(expiryTimeInMinutes = 60) {
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiryTime = Date.now() + expiryTimeInMinutes * 60 * 1000; // current time + expiry time in milliseconds
+    return {
+        token,
+        expiryTime
+    };
+}
+
+async function resetChangePasswordToken(data){
+    const db = client.db(DBNAME);
+    const users = db.collection("user");
+    const updateFilter = { 
+        $set: { 
+            change_password_token: {
+                token: null,
+                expireDate: null
+            }
+        }
+    }
+    await users.updateOne( {'change_password_token.token': data['token'] }, updateFilter); 
+}
+
+async function changePassword(data){
+    const db = client.db(DBNAME);
+    const users = db.collection("user");
+    const user = await users.findOne( 
+        {'change_password_token.token': data['token']}
+    );
+
+    if(user === null){
+        throw new ChangePasswordTokenNotValid();
+    } 
     
+    if(user.change_password_token.expireDate < Date.now()){
+        throw new ChangePasswordTokenExpired();
+    }
+
+    genSalt(10, function(_, salt) {
+        _hash(data['password'], salt, async function(_, hash) {
+            const updateFilter = { 
+                $set: { 
+                    password: hash,
+                    change_password_token: {
+                        token: null,
+                        expireDate: null
+                    }
+                }
+            }
+            
+            await users.updateOne(user, updateFilter); 
+        });
+    }); 
+}
+  
+async function setChangePasswordToken(data){
+    console.log("set change password token");
+    const token = generatePasswordTokenWithExpiry(15);
+    const db = client.db(DBNAME);
+    const users = db.collection("user");
+
+    const user = await users.findOne(
+        {
+            email: data['email']
+        }
+    );
+
+    if(user === null){
+        throw new EmailNotPresent();
+    }
+
+    console.log(user.change_password_token.token !== null);
+
+    if(user.change_password_token.token !== null){
+        console.log(user.change_password_token.expireDate);
+        console.log(new Date());
+        if( user.change_password_token.expireDate < new Date()){
+            throw new ChangePasswordTokenAlreadyPresent();
+        } else {
+            throw new ChangePasswordTokenExpired();
+        }
+    } 
+
+    const updateFilter = { 
+        $set: { 
+            change_password_token: {
+                token: token.token,
+                expireDate: token.expiryTime
+            }
+        }
+    }
+
+    await users.updateOne({email: data["email"]}, updateFilter); 
+    return token.token;
 }
 
 export default { 
     signUp, 
     login, 
     makeReservation, 
-    removeAllReservations,
     deleteReservation, 
     setPlaces, 
     getBookingRatios,
     getPlaceList,
     getUserBookings, 
-    editUserInfo
+    editUserInfo,
+    changePassword,
+    setChangePasswordToken,
+    resetChangePasswordToken
 };
