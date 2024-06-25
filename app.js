@@ -64,6 +64,55 @@ app.get('/', async (req, res) => {
   return res.status(200).send('User is logged');
 });
 
+let clients = [];
+let messageBuffer = [];
+const MESSAGE_BUFFER_SIZE = 100;
+
+// Function to add message to the buffer
+const addMessageToBuffer = (data) => {
+  if (messageBuffer.length >= MESSAGE_BUFFER_SIZE) {
+    messageBuffer.shift();
+  }
+  messageBuffer.push(data);
+};
+
+app.get('/events', (req, res) => {
+  const clientId = req.ip;
+  console.log("client connected")
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive'
+  });
+
+  const client = { id: clientId, res };
+  clients.push(client);
+
+  req.on('close', () => {
+    clients = clients.filter(c => c.res !== res);
+  });
+
+  // Send missed messages if any
+  const lastEventId = req.headers['last-event-id'];
+  if (lastEventId) {
+    const missedMessages = messageBuffer.filter(message => message.id > lastEventId);
+    missedMessages.forEach(message => res.write(`id: ${message.id}\ndata: ${JSON.stringify(message.data)}\n\n`));
+  }
+});
+
+let messageId = 0;
+
+const sendEvent = (data, excludeClientId) => {
+  messageId++;
+  const message = { id: messageId, data };
+  addMessageToBuffer(message);
+  clients.forEach(client => {
+    if (client.id !== excludeClientId && client.res) {
+      client.res.write(`id: ${messageId}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
+  });
+};
+
 // Stripe
 app.get('/initpayment', isUserLoggedIn, async (req, res) => {
   try {
@@ -125,20 +174,27 @@ app.post("/confirm-stripe-payment", isUserLoggedIn, async (req, res) => {
   if (isPaymentValid === "succeeded") {
     try {
       // Save reservation in db
-      res.status(200).send(
-        await db.makeReservation(
-          req.session.user,
-          req.session.order.column,
-          req.session.order.row,
-          req.session.order.date,
-          req.session.order.chair
-        ));
+      const data = await db.makeReservation(
+        req.session.user,
+        req.session.order.column,
+        req.session.order.row,
+        req.session.order.date,
+        req.session.order.chair
+      );
+
+      const publicData = {
+        date: data.date,
+        placeRow: data.placeRow,
+        placeIndex: data.placeIndex,
+      };
 
       req.session.paymentIntentId = undefined;
       req.session.paymentIntent = undefined;
       req.session.orderId = undefined;
       req.session.order = undefined;
-
+    
+      sendEvent(publicData, req.ip);
+      res.status(200).send(data);
       return;
     } catch (err) {
       console.log(err);
@@ -169,20 +225,27 @@ app.post('/paypal-buy', isUserLoggedIn, async (req, res) => {
       if (capture.status === "COMPLETED") {
         try {
           // Save reservation in db
-          res.status(200).send(
-            await db.makeReservation(
-              req.session.user,
-              req.session.order.column,
-              req.session.order.row,
-              req.session.order.date,
-              req.session.order.chair
-            ));
-
+          const data = await db.makeReservation(
+            req.session.user,
+            req.session.order.column,
+            req.session.order.row,
+            req.session.order.date,
+            req.session.order.chair
+          )
+          const publicData = {
+            date: data.date,
+            placeRow: data.placeRow,
+            placeIndex: data.placeIndex,
+          };    
+       
           req.session.paymentIntentId = undefined;
           req.session.paymentIntent = undefined;
           req.session.orderId = undefined;
           req.session.order = undefined;
 
+          sendEvent(publicData, req.ip);
+          res.status(200).send(data);
+          
           return;
         } catch (err) {
           console.log(err);
